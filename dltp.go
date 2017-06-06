@@ -33,6 +33,8 @@ import (
 	"strings"
 	"strconv"
 	"time"
+	"flag"
+	"path/filepath"
 )
 
 
@@ -57,6 +59,18 @@ const (
 	FIXP = 1 << 12
 	SCOD = 1 << 15
 )
+
+
+type stringList []string
+
+func (s *stringList) String() string {
+    return fmt.Sprint(*s)
+}
+
+func (s *stringList) Set(value string) error {
+    *s = strings.Split(value, ",")
+    return nil
+}
 
 
 type StorageHeader struct {
@@ -142,8 +156,8 @@ func (h *ExtendedHeader) Parse(data []byte) {
 
 	h.noar = int(data[1])
 
-	h.apid = string(data[2:6])
-	h.ctid = string(data[6:10])
+	h.apid = string(bytes.TrimRight(data[2:6], "\x00"))
+	h.ctid = string(bytes.TrimRight(data[6:10], "\x00"))
 }
 
 
@@ -305,18 +319,64 @@ func parseMessages(buf <-chan []byte) (<-chan Message) {
 }
 
 
-func main() {
-	f, err := os.Open(os.Args[1])
-	if err != nil {
-		log.Fatalln(err)
+func match_appid(m Message, apps map[string]bool) bool {
+	if m.sh.ueh {
+		_, ok := apps[m.eh.apid]
+		return ok
 	}
-	defer f.Close()
+	return false
+}
 
-	c := readMessages(f)
-	m := parseMessages(c)
-	index := 0
-	for msg := range m {
-		printMessage(msg, index)
-		index++
+
+func filterMessages(msg <-chan Message, appidList stringList) (<-chan Message) {
+	out := make(chan Message)
+	apps := make(map[string]bool)
+	for _, app := range(appidList) {
+		apps[app] = true
+	}
+	go func () {
+		for m := range msg {
+			if len(apps)==0 || match_appid(m, apps) {
+				out <- m
+			}
+		}
+		close(out)
+	}()
+	return out
+}
+
+
+func usage() {
+	fmt.Fprintf(os.Stderr, "Usage: %s [options] FILE [...]\n", filepath.Base(os.Args[0]))
+	flag.PrintDefaults()
+}
+
+
+func main() {
+	var appidList stringList
+	flag.Var(&appidList, "a", "comma-separated list of the APPID to show")
+	flag.Usage = usage
+	flag.Parse()
+
+	if flag.NArg() == 0 {
+		usage()
+		os.Exit(-1)
+	}
+
+	for _, fn := range flag.Args() {
+		f, err := os.Open(fn)
+		if err != nil {
+			log.Fatalln(err)
+		}
+		defer f.Close()
+
+		c := readMessages(f)
+		m := parseMessages(c)
+		fm := filterMessages(m, appidList)
+		index := 0
+		for msg := range fm {
+			printMessage(msg, index)
+			index++
+		}
 	}
 }
