@@ -113,6 +113,7 @@ type Message struct {
 	pl Payload
 
 	verbose bool
+	index uint
 }
 
 
@@ -227,8 +228,9 @@ func (p *Payload) Parse(verbose bool, noar int, data []byte) {
 }
 
 
-func parse_message(data []byte) Message {
+func parse_message(data []byte, index uint) Message {
 	var msg Message
+	msg.index = index
 	msg.st.Parse(data[:16])
 	data = data[16:]
 	msg.sh.Parse(data)
@@ -245,8 +247,8 @@ func parse_message(data []byte) Message {
 }
 
 
-func printMessage(msg Message, index int, verbose bool) {
-	fmt.Printf("%d\t%-32s\t%.4f", index, msg.st.timestamp.Format(time.RFC3339Nano), msg.sh.tmsp)
+func printMessage(msg Message, verbose bool) {
+	fmt.Printf("%d\t%-32s\t%.4f", msg.index, msg.st.timestamp.Format(time.RFC3339Nano), msg.sh.tmsp)
 	if verbose {
 		fmt.Printf("\t%X\t%X", msg.sh.htyp, msg.sh.mcnt)
 		verb := "n"
@@ -315,8 +317,10 @@ func readMessages(f *os.File) <-chan []byte {
 func parseMessages(buf <-chan []byte) (<-chan Message) {
 	out := make(chan Message)
 	go func () {
+		var i uint = 0
 		for m := range buf {
-			out <- parse_message(m)
+			out <- parse_message(m, i)
+			i++
 		}
 		close(out)
 	}()
@@ -379,10 +383,8 @@ func main() {
 		c := readMessages(f)
 		m := parseMessages(c)
 		fm := filterMessages(m, appidList)
-		index := 0
 		for msg := range fm {
-			printMessage(msg, index, *v)
-			index++
+			printMessage(msg, *v)
 		}
 	}
 }
