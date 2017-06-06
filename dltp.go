@@ -245,16 +245,21 @@ func parse_message(data []byte) Message {
 }
 
 
-func printMessage(msg Message, index int) {
-	fmt.Printf("%d\t%X %X\t%-32s\t%.4f", index, msg.sh.htyp, msg.sh.mcnt, msg.st.timestamp.Format(time.RFC3339Nano), msg.sh.tmsp)
-	verb := "n"
-	if msg.verbose {
-		verb = "v"
+func printMessage(msg Message, index int, verbose bool) {
+	fmt.Printf("%d\t%-32s\t%.4f", index, msg.st.timestamp.Format(time.RFC3339Nano), msg.sh.tmsp)
+	if verbose {
+		fmt.Printf("\t%X\t%X", msg.sh.htyp, msg.sh.mcnt)
+		verb := "n"
+		if msg.verbose {
+			verb = "v"
+		}
+		fmt.Printf("\t%s", verb)
 	}
-	fmt.Printf("\t%s", verb)
 	if msg.sh.ueh {
-		fmt.Printf("\t%X %X\t%-4s %-4s\t(%d)", msg.eh.mstp, msg.eh.mtin,
-			strings.Trim(msg.eh.apid, "\x00"), strings.Trim(msg.eh.ctid, "\x00"), msg.eh.noar)
+		fmt.Printf("\t%-4s\t%-4s", strings.Trim(msg.eh.apid, "\x00"), strings.Trim(msg.eh.ctid, "\x00"))
+		if verbose {
+			fmt.Printf("\t%X\t%X\t(%d)", msg.eh.mstp, msg.eh.mtin, msg.eh.noar)
+		}
 	}
 	for i, v := range(msg.pl.args) {
 		if i==0 {
@@ -355,6 +360,7 @@ func usage() {
 func main() {
 	var appidList stringList
 	flag.Var(&appidList, "a", "comma-separated list of the APPID to show")
+	v := flag.Bool("v", false, "print all fields")
 	flag.Usage = usage
 	flag.Parse()
 
@@ -375,7 +381,7 @@ func main() {
 		fm := filterMessages(m, appidList)
 		index := 0
 		for msg := range fm {
-			printMessage(msg, index)
+			printMessage(msg, index, *v)
 			index++
 		}
 	}
