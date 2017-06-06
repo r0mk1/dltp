@@ -31,6 +31,9 @@ import (
 	"encoding/binary"
 	"errors"
 	"bytes"
+	"strings"
+	"strconv"
+	"time"
 )
 
 var (
@@ -39,6 +42,7 @@ var (
 
 const (
 	UEH  = 1 << 0
+	MSBF = 1 << 1
 	WEID = 1 << 2
 	WSID = 1 << 3
 	WTMS = 1 << 4
@@ -49,92 +53,208 @@ const (
 )
 
 const (
+	BOOL = 1 << 4
+	SINT = 1 << 5
+	UINT = 1 << 6
 	STRG = 1 << 9
 	VARI = 1 << 11
+	FIXP = 1 << 12
 	SCOD = 1 << 15
 )
 
 
-type MessageHeader struct {
-	
+type StorageHeader struct {
+	timestamp time.Time
+}
+
+
+type StandardHeader struct {
+	htyp byte
+	msbf bool
+	weid bool
+	wsid bool
+	wtms bool
+	ueh  bool
+
+	mcnt byte
+	len  uint16
+	tmsp float32
+
+	size int
+}
+
+
+type ExtendedHeader struct {
+	msin byte
+	verb bool
+	mstp int
+	mtin int
+	noar int
+	apid string
+	ctid string
+}
+
+type Payload struct {
+	args []interface{}
 }
 
 type Message struct {
-	standardHeader []byte
-	extendedHeader []byte
-	payload []byte
+	st StorageHeader
+	sh StandardHeader
+	eh ExtendedHeader
+	pl Payload
+
+	verbose bool
 }
 
-func (msg *Message) Read(data []byte) {
-	htyp := data[0]
-	sz := 4
-	if htyp & WEID != 0 {
-		sz += 4
-	}
-	if htyp & WSID != 0 {
-		sz += 4
-	}
-	if htyp & WTMS != 0 {
-		sz += 4
-	}
-	msg.standardHeader = data[:sz]
-	
-	if htyp & UEH != 0 {
-		msg.extendedHeader = data[sz:sz+10]
-		sz += 10
-	}
 
-	msg.payload = data[sz:]
+func (h *StorageHeader) Parse(data []byte) {
+	sec := int64(binary.LittleEndian.Uint32(data[4:8]))
+	mic := int64(binary.LittleEndian.Uint32(data[8:12]))
+	h.timestamp = time.Unix(sec, mic*1000)
 }
 
-func decodePayload(buf []byte, verbose bool, noar int) string {
-	if buf != nil {
-		if verbose {
-			offset := 0
-			for i:=0; i<noar; i++ {
-				typeInfo := binary.LittleEndian.Uint32(buf[offset:offset+4])
-				if typeInfo & STRG == STRG {
-					if typeInfo & VARI == VARI {
-						fmt.Println("*****   VARI   *****\n")
-					}
-					length := int(binary.LittleEndian.Uint16(buf[offset+4:offset+6]))
-					return fmt.Sprintf("\t%#x\t%s", typeInfo, string(buf[offset+6:offset+6+length]))
-					offset += 6+length
-				} else {
-					return fmt.Sprintf("\t%#x\t%d", typeInfo, len(buf))
-				}
-			}
-		} else {
-			messageID := binary.LittleEndian.Uint32(buf[:4])
-			return fmt.Sprintf("\t<%d (%d) %q>", messageID, len(buf[4:]), buf[4:])
-		}
+
+func (h *StandardHeader) Parse(data []byte) {
+	h.htyp = data[0]
+	h.msbf = h.htyp & MSBF != 0
+	h.weid = h.htyp & WEID != 0
+	h.wsid = h.htyp & WSID != 0
+	h.wtms = h.htyp & WTMS != 0	
+	h.ueh  = h.htyp & UEH != 0
+
+	h.mcnt = data[1]
+	h.len  = binary.BigEndian.Uint16(data[2:4])
+
+	h.size = 4
+	if h.weid {
+		h.size += 4
 	}
-	return ""
+	if h.wsid {
+		h.size += 4
+	}
+	if h.wtms {
+		h.tmsp = 1E-4 * float32(binary.BigEndian.Uint32(data[h.size:h.size+4]))
+		h.size += 4
+	}
+}
+
+
+func (h *ExtendedHeader) Parse(data []byte) {
+	h.msin = data[0]
+	h.verb = h.msin & VERB != 0
+	h.mstp = int(h.msin >> 1) & 0x03
+	h.mtin = int(h.msin >> 4) & 0x0F
+
+	h.noar = int(data[1])
+
+	h.apid = string(data[2:6])
+	h.ctid = string(data[6:10])
+}
+
+
+func parseBool(tinfo uint32, data []byte) (v interface{}, rest []byte) {
+	val := true
+	if data[0] == 0 {
+		val = false
+	}
+	return val, data[1:]
+}
+
+
+func parseSint(tinfo uint32, data []byte) (v interface{}, rest []byte) {
+	length := 1 << (tinfo & 0x0F - 1)
+	return int32(0), data[length:]
+}
+
+
+func parseUint(tinfo uint32, data []byte) (v interface{}, rest []byte) {
+	length := 1 << (tinfo & 0x0F - 1)
+	return uint32(0), data[length:]
+}
+
+
+func parseString(tinfo uint32, data []byte) (v interface{}, rest []byte) {
+	length := binary.LittleEndian.Uint16(data[:2])
+	s := strconv.QuoteToGraphic(string(bytes.TrimRight(data[2:2+length], "\x00")))
+	return s[1:len(s)-1], data[2+length:] // return without quotes
+}
+
+
+func parseArg(data []byte) (arg interface{}, rest []byte) {
+	pf := map[uint32] func (ti uint32, data []byte) (interface{}, []byte) {
+		BOOL : parseBool,
+		SINT : parseSint,
+		UINT : parseUint,
+		STRG : parseString,
+	}
+
+	typeInfo := binary.LittleEndian.Uint32(data[:4])
+	if typeInfo & VARI == VARI {
+		fmt.Println("*****   VARI   *****\n")
+	}
+	if typeInfo & FIXP == FIXP {
+		fmt.Println("*****   FIXP   *****\n")
+	}
+
+	key := typeInfo & (BOOL | SINT | UINT | STRG)
+	if key != 0 {
+		return pf[key](typeInfo, data[4:])
+	}
+	return data, data
+}
+
+
+func (p *Payload) Parse(verbose bool, noar int, data []byte) {
+	if !verbose {
+		messageID := binary.LittleEndian.Uint32(data[:4])
+		p.args = []interface{} {fmt.Sprintf("<%d (%d) %q>", messageID, len(data[4:]), data[4:])}
+		return
+	}
+
+	p.args = make([]interface{}, noar)
+	for i:=0; i<noar; i++ {
+		p.args[i], data = parseArg(data)
+	}
+}
+
+
+func (msg *Message) Parse(data []byte) {
+	msg.st.Parse(data[:16])
+	data = data[16:]
+	msg.sh.Parse(data)
+	payloadOffset := msg.sh.size
+	noar := 0
+	if msg.sh.ueh {
+		msg.eh.Parse(data[msg.sh.size:msg.sh.size+10])
+		noar = msg.eh.noar
+		payloadOffset += 10
+	}
+	msg.verbose = msg.sh.ueh && msg.eh.verb
+	msg.pl.Parse(msg.verbose, noar, data[payloadOffset:])
 }
 
 
 func printMessage(msg Message, index int) {
-	htyp := msg.standardHeader[0]
-	mcnt := msg.standardHeader[1]
-
-	fmt.Printf("%d\t%X %X", index, htyp, mcnt)
-
-	verbose := false
-	noar := 0
-	if msg.extendedHeader != nil {
-		msin := msg.extendedHeader[0]
-		noar = int(msg.extendedHeader[1])
-		apid := string(msg.extendedHeader[2:6])
-		ctid := string(msg.extendedHeader[6:10])
-		if msin & VERB == VERB {
-			verbose = true
-		}
-		mstp := (msin >> 1) & 0x03
-		msli := (msin >> 4) & 0x0F
-		fmt.Printf("\t%t\t%X %X\t%s %s\t(%d)", verbose, mstp, msli, string(apid), string(ctid), noar)
+	fmt.Printf("%d\t%X %X\t%-32s\t%.4f", index, msg.sh.htyp, msg.sh.mcnt, msg.st.timestamp.Format(time.RFC3339Nano), msg.sh.tmsp)
+	verb := "n"
+	if msg.verbose {
+		verb = "v"
 	}
-
-	fmt.Printf("\t%s\n", decodePayload(msg.payload, verbose, noar));
+	fmt.Printf("\t%s", verb)
+	if msg.sh.ueh {
+		fmt.Printf("\t%X %X\t%-4s %-4s\t(%d)", msg.eh.mstp, msg.eh.mtin,
+			strings.Trim(msg.eh.apid, "\x00"), strings.Trim(msg.eh.ctid, "\x00"), msg.eh.noar)
+	}
+	for i, v := range(msg.pl.args) {
+		if i==0 {
+			fmt.Printf("\t")
+		} else {
+			fmt.Printf(" ")
+		}
+		fmt.Printf("%v",  v)
+	}
+	fmt.Printf("\n")
 }
 
 
@@ -147,7 +267,7 @@ func main() {
 
 	split := func(data []byte, atEOF bool) (advance int, token []byte, err error) {
 		if len(data) < 16 + 4 {
-			log.Fatal(ErrBadHeader)
+			return 0, nil, nil
 		}
 
 		var mlen uint16
@@ -158,6 +278,9 @@ func main() {
 		}
 
 		advance = 16 + int(mlen)
+		if len(data) < advance {
+			return 0, nil, nil
+		}
 		token = data[:advance]
 		err = nil
 		if len(data) <= advance {
@@ -175,7 +298,7 @@ func main() {
 	index := 0
 	for scn.Scan() {
 		var msg Message
-		msg.Read(scn.Bytes()[16:]) // skip storage prefix
+		msg.Parse(scn.Bytes())
 		printMessage(msg, index)
 		index++
 	}
