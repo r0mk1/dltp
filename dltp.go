@@ -29,16 +29,12 @@ import (
 	"log"
 	"bufio"
 	"encoding/binary"
-	"errors"
 	"bytes"
 	"strings"
 	"strconv"
 	"time"
 )
 
-var (
-        ErrBadHeader = errors.New("dlt.Scanner: Bad header")
-)
 
 const (
 	UEH  = 1 << 0
@@ -67,7 +63,6 @@ type StorageHeader struct {
 	timestamp time.Time
 }
 
-
 type StandardHeader struct {
 	htyp byte
 	msbf bool
@@ -82,7 +77,6 @@ type StandardHeader struct {
 
 	size int
 }
-
 
 type ExtendedHeader struct {
 	msin byte
@@ -191,10 +185,10 @@ func parseArg(data []byte) (arg interface{}, rest []byte) {
 
 	typeInfo := binary.LittleEndian.Uint32(data[:4])
 	if typeInfo & VARI == VARI {
-		fmt.Println("*****   VARI   *****\n")
+		log.Fatal("parseArg: VARI parsing isn't implemented")
 	}
 	if typeInfo & FIXP == FIXP {
-		fmt.Println("*****   FIXP   *****\n")
+		log.Fatal("parseArg: FIXP parsing isn't implemented")
 	}
 
 	key := typeInfo & (BOOL | SINT | UINT | STRG)
@@ -219,7 +213,8 @@ func (p *Payload) Parse(verbose bool, noar int, data []byte) {
 }
 
 
-func (msg *Message) Parse(data []byte) {
+func parse_message(data []byte) Message {
+	var msg Message
 	msg.st.Parse(data[:16])
 	data = data[16:]
 	msg.sh.Parse(data)
@@ -232,6 +227,7 @@ func (msg *Message) Parse(data []byte) {
 	}
 	msg.verbose = msg.sh.ueh && msg.eh.verb
 	msg.pl.Parse(msg.verbose, noar, data[payloadOffset:])
+	return msg
 }
 
 
@@ -258,6 +254,57 @@ func printMessage(msg Message, index int) {
 }
 
 
+func splitMessage(data []byte, atEOF bool) (advance int, token []byte, err error) {
+	if len(data) < 16 + 4 {
+		return 0, nil, nil
+	}
+
+	mlen := binary.BigEndian.Uint16(data[18:20])
+
+	advance = 16 + int(mlen)
+	if len(data) < advance {
+		return 0, nil, nil
+	}
+
+	err = nil
+	if atEOF {
+		err = bufio.ErrFinalToken
+	}
+	return advance, data[:advance], err
+}
+
+
+func readMessages(f *os.File) <-chan []byte {
+	out := make(chan []byte)
+	go func () {
+		scn := bufio.NewScanner(f)
+		scn.Split(splitMessage)
+
+		for scn.Scan() {
+			out <- append([]byte{}, scn.Bytes()...)
+		}
+
+		if err := scn.Err(); err != nil {
+			log.Fatal(err)
+		}
+		close(out)
+	}()
+	return out
+}
+
+
+func parseMessages(buf <-chan []byte) (<-chan Message) {
+	out := make(chan Message)
+	go func () {
+		for m := range buf {
+			out <- parse_message(m)
+		}
+		close(out)
+	}()
+	return out
+}
+
+
 func main() {
 	f, err := os.Open(os.Args[1])
 	if err != nil {
@@ -265,45 +312,11 @@ func main() {
 	}
 	defer f.Close()
 
-	split := func(data []byte, atEOF bool) (advance int, token []byte, err error) {
-		if len(data) < 16 + 4 {
-			return 0, nil, nil
-		}
-
-		var mlen uint16
-		buf := bytes.NewReader(data[18:20])
-		err = binary.Read(buf, binary.BigEndian, &mlen)
-		if err != nil {
-			log.Fatal(err)
-		}
-
-		advance = 16 + int(mlen)
-		if len(data) < advance {
-			return 0, nil, nil
-		}
-		token = data[:advance]
-		err = nil
-		if len(data) <= advance {
-			if atEOF {
-				err = bufio.ErrFinalToken
-			} else {
-				return 0, nil, nil
-			}
-		}
-		return
-	}
-
-	scn := bufio.NewScanner(f)
-	scn.Split(split)
+	c := readMessages(f)
+	m := parseMessages(c)
 	index := 0
-	for scn.Scan() {
-		var msg Message
-		msg.Parse(scn.Bytes())
+	for msg := range m {
 		printMessage(msg, index)
 		index++
-	}
-
-	if err = scn.Err(); err != nil {
-		log.Fatal(err)
 	}
 }
